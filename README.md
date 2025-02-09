@@ -24,7 +24,7 @@ Ensure the following are installed on your system:
 Clone the ICADS repository to your local machine:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/ICADS.git
+git clone https://github.com/mzainxo/ICADS.git
 cd ICADS
 ```
 
