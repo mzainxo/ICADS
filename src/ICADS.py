@@ -272,7 +272,7 @@ def process_new_entries():
                     #prediction = classify_flow(features)
                     #if prediction == 1:  # DDoS detected
                 try:
-                    flagged_ip = '192.111.33.32'
+                    flagged_ip = input("ENTER IP:" )
                     print(f"DDoS detected from {flagged_ip} at {datetime.now()}")
                     add_ip_to_blacklist(flagged_ip)
                 except Exception as e:
