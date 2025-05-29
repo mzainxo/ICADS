@@ -2,11 +2,14 @@ import time
 import threading
 import pickle
 import pandas as pd
-import ipaddress
 from datetime import datetime
 import pexpect
-from scapy.all import sniff, IP, TCP, UDP, ICMP
+from scapy.all import sniff, IP, TCP
 from concurrent.futures import ThreadPoolExecutor
+import subprocess
+import psutil
+
+from firebase_manager import log_stats
 
 # Configuration
 INTERFACE    = "eth0"
@@ -20,14 +23,22 @@ with open(MODEL_PATH, "rb") as f:
 # Thread-safe structures
 blacklisted_ips = set()
 flows = {}
-data_lock = threading.Lock()        # For flows and counters
-blacklist_lock = threading.Lock()   # For Suricata commands
-executor = ThreadPoolExecutor(max_workers=4)  # For classification tasks
+hping_sources = set()
+data_lock = threading.Lock()
+blacklist_lock = threading.Lock()
+executor = ThreadPoolExecutor(max_workers=6)
 
-# Counters
+# Counters and status variables
 total_packets = 0
 hping3_packets = 0
 classified_ddos_packets = 0
+ddos_hping_packets = 0
+system_status = "NORMAL"
+last_ddos_time = None
+last_normal_time = datetime.now().isoformat()
+current_target_ip = None
+current_src_ip = None
+
 
 def add_ip_to_blacklist(ip):
     with data_lock:
@@ -40,7 +51,7 @@ def add_ip_to_blacklist(ip):
         f"sudo suricatasc -c 'dataset-add blacklist ip {ip}'",
         "sudo suricatasc -c 'reload-rules'"
     ]
-    
+
     with blacklist_lock:
         try:
             for cmd in cmds:
@@ -65,8 +76,8 @@ def make_features(stat):
     }
 
 def classify_flow(st):
-    global classified_ddos_packets
-    
+    global classified_ddos_packets, ddos_hping_packets
+
     feats = make_features(st)
     df = pd.DataFrame([feats])
     pred = model.predict(df)[0]
@@ -74,10 +85,15 @@ def classify_flow(st):
     if pred == 1:
         with data_lock:
             classified_ddos_packets += st['pkt_count']
+            if st['is_hping']:
+                ddos_hping_packets += st['pkt_count']
         print(f"[{datetime.now()}] 🚨 DDoS detected from {st['src_ip']}")
         add_ip_to_blacklist(st['src_ip'])
     else:
         print(f"[{datetime.now()}] ✅ Benign flow: {st['src_ip']} -> {st['dst_ip']}")
+
+def get_cpu_usage():
+    return psutil.cpu_percent(interval=1)
 
 def flow_collector(pkt):
     global total_packets, hping3_packets
@@ -94,7 +110,6 @@ def flow_collector(pkt):
     size = len(pkt)
     ttl = ip.ttl
 
-    # Pre-calculate values outside lock
     is_hping = ttl == 111
     direction = 'fwd' if ip.src == key[0] else 'bwd'
 
@@ -102,6 +117,7 @@ def flow_collector(pkt):
         total_packets += 1
         if is_hping:
             hping3_packets += 1
+            hping_sources.add(ip.src)
 
         if key not in flows:
             flows[key] = {
@@ -120,6 +136,7 @@ def flow_collector(pkt):
                 'bwd_header_len': 0,
                 'fwd_total_bytes': 0,
                 'bwd_total_bytes': 0,
+                'is_hping': is_hping
             }
 
         st = flows[key]
@@ -146,30 +163,84 @@ def flow_timeout_checker():
             for key, st in list(flows.items()):
                 if now - st['last_seen'] > FLOW_TIMEOUT:
                     expired.append((key, flows.pop(key)))
-            
+
         for key, st in expired:
             executor.submit(classify_flow, st)
-        
+
         time.sleep(1)
 
 def stats_printer():
+    global system_status, last_ddos_time, last_normal_time, current_target_ip, target_ip, src_ip, current_src_ip
+
     while True:
         with data_lock:
-            current_total = total_packets 
+            current_total = total_packets
             current_hping = hping3_packets
-            current_ddos = classified_ddos_packets
-            current_benign_hping = current_hping - current_ddos
+            current_ddos = classified_ddos_packets if classified_ddos_packets > 200 else 0
+            current_ddos_hping = ddos_hping_packets
+            current_benign_hping = current_hping - current_ddos_hping if current_hping > 0 else 0
             current_benign = current_total - current_hping
 
+            active_hping = False
+            
+            for st in flows.values():
+                if st['is_hping']:
+                    active_hping = True
+                    target_ip = st['dst_ip']
+                    src_ip = st['src_ip']
+
+            new_status = "DDoS" if active_hping else "Normal"
+            now = datetime.now().isoformat()
+
+            if new_status != system_status:
+                print(f"[STATUS CHANGE] {system_status} -> {new_status} at {now}")
+                
+                if new_status == "DDoS":
+                    last_ddos_time = now
+                    current_target_ip = target_ip
+                    current_src_ip = src_ip
+                else:
+                    last_normal_time = now
+                
+                system_status = new_status
+
         try:
-            accuracy = current_ddos / current_hping if current_hping > 0 else 0
+            accuracy = current_ddos_hping / current_hping if current_hping > 0 else 0
         except ZeroDivisionError:
             accuracy = 0.0
+        cpu_usage = get_cpu_usage()
+        
+        stats = {
+            "total_packets": int(current_total),
+            "ddos_packets": int(current_ddos),
+            "benign_hping": int(current_benign_hping),
+            "benign": int(current_benign),
+            "simulated_hping": int(current_hping),
+            "accuracy": float(accuracy),
+            "system_status": system_status,
+            "cpu_usage": float(cpu_usage),
+            "last_ddos_time": last_ddos_time,
+            "last_normal_time": last_normal_time,
+            "source_ip": current_src_ip if current_src_ip != None else "0.0.0.0",
+            "destination_ip": current_target_ip if current_target_ip != None else "0.0.0.0"
+        }
 
-        print(f"[STATS] Total: {current_total} | DDoS: {current_ddos} "
+        print(f"[STATS] Status: {system_status} | "
+              f"Last DDoS: {last_ddos_time or 'Never'} | "
+              f"Last Normal: {last_normal_time} | "
+              f"Source: {current_src_ip or '0.0.0.0'} | "
+              f"Target: {current_target_ip or '0.0.0.0'} | "
+              f"CPU: {cpu_usage}%"
+              f"| Total: {current_total} | DDoS: {current_ddos} "
               f"| Benign (HPING3): {current_benign_hping} | Benign: {current_benign}"
               f"| Simulated (HPING3): {current_hping} | Accuracy: {accuracy:.2f}")
-        time.sleep(5)
+
+        try:
+            log_stats(stats)
+        except Exception as e:
+            print(f"[ERROR] Firebase logging: {e}")
+
+        time.sleep(1)
 
 if __name__ == '__main__':
     print(f"Starting packet capture on {INTERFACE}...")
