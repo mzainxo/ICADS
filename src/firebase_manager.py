@@ -17,4 +17,4 @@ def log_ddos_detection(flow_data):
 
 def log_stats(stats):
     ref = db.reference("stats")
-    ref.set(stats)
+    ref.update(stats)

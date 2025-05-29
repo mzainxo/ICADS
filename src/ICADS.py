@@ -38,6 +38,7 @@ last_ddos_time = None
 last_normal_time = datetime.now().isoformat()
 current_target_ip = None
 current_src_ip = None
+global ssid
 
 
 def add_ip_to_blacklist(ip):
@@ -170,17 +171,16 @@ def flow_timeout_checker():
         time.sleep(1)
 
 def stats_printer():
-    global system_status, last_ddos_time, last_normal_time, current_target_ip, target_ip, src_ip, current_src_ip
+    global system_status, last_ddos_time, last_normal_time, current_target_ip, target_ip, src_ip, current_src_ip, ssid
 
     while True:
         with data_lock:
             current_total = total_packets
             current_hping = hping3_packets
-            current_ddos = classified_ddos_packets if classified_ddos_packets > 200 else 0
+            current_ddos = classified_ddos_packets if classified_ddos_packets > 50 else 0
             current_ddos_hping = ddos_hping_packets
             current_benign_hping = current_hping - current_ddos_hping if current_hping > 0 else 0
             current_benign = current_total - current_hping
-
             active_hping = False
             
             for st in flows.values():
@@ -240,7 +240,7 @@ def stats_printer():
         except Exception as e:
             print(f"[ERROR] Firebase logging: {e}")
 
-        time.sleep(1)
+        time.sleep(0.5)
 
 if __name__ == '__main__':
     print(f"Starting packet capture on {INTERFACE}...")
