@@ -1,5 +1,4 @@
 # ICADS - Intelligent Cyber Attacks Detection System
-## 🚧 UNDER CONSTRUCTION 🚧
 ## Overview
 
 **ICADS** is an intelligent cybersecurity system designed to detect and classify DDoS (Distributed Denial of Service) attacks in real-time. By integrating anomaly based detection with the **Suricata IDS**, this project enhances network traffic analysis and threat detection capabilities.
